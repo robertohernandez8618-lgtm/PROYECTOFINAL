@@ -1,2 +1,2 @@
 # PROYECTOFINAL
-Procesador MIPS para instruccions tipo R, I y J
+Procesador MIPS para instrucciones tipo R, I y J

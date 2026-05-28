@@ -1,0 +1,545 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+
+# ── Tablas MIPS ─────────────────────────────────────────────
+
+REG = {
+    "$zero": "00000", "$at": "00001",
+    "$v0": "00010", "$v1": "00011",
+    "$a0": "00100", "$a1": "00101",
+    "$a2": "00110", "$a3": "00111",
+    "$t0": "01000", "$t1": "01001",
+    "$t2": "01010", "$t3": "01011",
+    "$t4": "01100", "$t5": "01101",
+    "$t6": "01110", "$t7": "01111",
+    "$s0": "10000", "$s1": "10001",
+    "$s2": "10010", "$s3": "10011",
+    "$s4": "10100", "$s5": "10101",
+    "$s6": "10110", "$s7": "10111",
+    "$t8": "11000", "$t9": "11001",
+}
+
+
+# Tipo R – código de función (6 bits)
+FUNCT = {
+    "add": "100000",
+    "sub": "100010",
+    "and": "100100",
+    "or": "100101",
+    "xor": "100110",
+    "slt": "101010",
+    "srl": "000010",
+    "sra": "000011",
+    "tge": "110000",
+    "teq": "110100",
+}
+
+
+# Tipo I – opcode (6 bits)
+OPCODE_I = {
+    "addi": "001000",
+    "slti": "001010",
+    "andi": "001100",
+    "ori": "001101",
+    "lw": "100011",
+    "sw": "101011",
+    "beq": "000100",
+    "bne": "000101"
+}
+
+
+# Tipo J – opcode (6 bits)
+OPCODE_J = {
+    "j": "000010"
+}
+
+
+# ── Helpers ─────────────────────────────────────────────
+
+def to_bin(val, bits):
+    """
+    Entero (con signo) a cadena binaria de `bits` dígitos.
+    """
+    v = int(val)
+
+    if v < 0:
+        # complemento a 2
+        v = v & ((1 << bits) - 1)
+
+    return format(v, f'0{bits}b')
+
+
+def parse_mem(operand):
+    """
+    Descompone 'offset(base)' → (offset_str, base_reg_str).
+    """
+    operand = operand.strip()
+
+    if '(' in operand:
+        offset_str, rest = operand.split('(', 1)
+        base_reg = rest.rstrip(')')
+
+        return offset_str.strip(), base_reg.strip()
+
+    raise ValueError(
+        f"Formato de memoria inválido: '{operand}'"
+    )
+
+
+# ── Ensamblador de una línea ─────────────────────────────
+
+def ensamblar_linea(
+    linea,
+    num_linea=None,
+    labels=None,
+    pc_actual=None
+):
+    """
+    Convierte una línea de ensamblador MIPS
+    a una cadena de 32 bits.
+    """
+
+    linea = (
+        linea.split('#')[0]
+        .replace(',', ' ')
+        .strip()
+        .lower()
+    )
+
+    if not linea:
+        return None
+
+    partes = linea.split()
+    inst = partes[0]
+
+    if inst == "nop":
+        return "0" * 32
+
+    opcode = "000000"
+
+    try:
+
+        # ── Tipo R ─────────────────────
+        if inst in (
+            "add", "sub", "and",
+            "or", "xor", "slt"
+        ):
+
+            rd = partes[1]
+            rs = partes[2]
+            rt = partes[3]
+
+            return (
+                opcode +
+                REG[rs] +
+                REG[rt] +
+                REG[rd] +
+                "00000" +
+                FUNCT[inst]
+            )
+
+        # ── Shift ─────────────────────
+        elif inst in ("srl", "sra"):
+
+            rd = partes[1]
+            rt = partes[2]
+            shamt = partes[3]
+
+            return (
+                opcode +
+                "00000" +
+                REG[rt] +
+                REG[rd] +
+                to_bin(shamt, 5) +
+                FUNCT[inst]
+            )
+
+        # ── Trampas ───────────────────
+        elif inst in ("tge", "teq"):
+
+            rs = partes[1]
+            rt = partes[2]
+
+            return (
+                opcode +
+                REG[rs] +
+                REG[rt] +
+                "00000" +
+                "00000" +
+                FUNCT[inst]
+            )
+
+        # ── Tipo I inmediato ──────────
+        elif inst in (
+            "addi",
+            "slti",
+            "andi",
+            "ori"
+        ):
+
+            rt = partes[1]
+            rs = partes[2]
+            imm = partes[3]
+
+            return (
+                OPCODE_I[inst] +
+                REG[rs] +
+                REG[rt] +
+                to_bin(imm, 16)
+            )
+
+        # ── lw ────────────────────────
+        elif inst == "lw":
+
+            rt = partes[1]
+            offset_str, rs = parse_mem(
+                partes[2]
+            )
+
+            return (
+                OPCODE_I["lw"] +
+                REG[rs] +
+                REG[rt] +
+                to_bin(offset_str, 16)
+            )
+
+        # ── sw ────────────────────────
+        elif inst == "sw":
+
+            rt = partes[1]
+            offset_str, rs = parse_mem(
+                partes[2]
+            )
+
+            return (
+                OPCODE_I["sw"] +
+                REG[rs] +
+                REG[rt] +
+                to_bin(offset_str, 16)
+            )
+
+        # ── beq / bne ─────────────────
+        elif inst in ("beq", "bne"):
+
+            rs = partes[1]
+            rt = partes[2]
+            destino = partes[3]
+
+            if labels and destino in labels:
+                offset_num = (
+                    labels[destino]
+                    - (pc_actual + 1)
+                )
+            else:
+                offset_num = int(destino)
+
+            return (
+                OPCODE_I[inst] +
+                REG[rs] +
+                REG[rt] +
+                to_bin(offset_num, 16)
+            )
+
+        # ── Tipo J ────────────────────
+        elif inst == "j":
+
+            destino = partes[1]
+
+            if labels and destino in labels:
+                target_address = labels[destino]
+            else:
+                target_address = int(destino)
+
+            return (
+                OPCODE_J["j"] +
+                to_bin(target_address, 26)
+            )
+
+    except KeyError as e:
+        return (
+            f"ERROR línea {num_linea}: "
+            f"registro desconocido {e}"
+        )
+
+    except Exception as e:
+        return (
+            f"ERROR línea {num_linea}: "
+            f"{e}"
+        )
+
+    return (
+        f"ERROR línea {num_linea}: "
+        f"instrucción no reconocida"
+    )
+
+
+# ── GUI ─────────────────────────────────────────────
+
+def seleccionar_archivo():
+
+    ruta = filedialog.askopenfilename(
+        filetypes=[
+            ("MIPS Assembly", "*.asm"),
+            ("Text files", "*.txt")
+        ]
+    )
+
+    if ruta:
+        entrada_ruta.delete(0, tk.END)
+        entrada_ruta.insert(0, ruta)
+
+
+def procesar_archivo():
+
+    ruta_origen = entrada_ruta.get()
+
+    if not ruta_origen:
+        messagebox.showwarning(
+            "Atención",
+            "Primero carga un archivo .asm"
+        )
+        return
+
+    try:
+
+        with open(ruta_origen, 'r') as f:
+            lineas_crudas = f.readlines()
+
+        labels = {}
+        lineas_instrucciones = []
+
+        # Primera pasada
+        pc_temp = 0
+
+        for idx, l in enumerate(
+            lineas_crudas,
+            start=1
+        ):
+
+            linea_limpia = (
+                l.split('#')[0]
+                .replace(',', ' ')
+                .strip()
+                .lower()
+            )
+
+            if not linea_limpia:
+                continue
+
+            if ':' in linea_limpia:
+
+                partes_etiqueta = (
+                    linea_limpia.split(':', 1)
+                )
+
+                nombre_label = (
+                    partes_etiqueta[0]
+                    .strip()
+                )
+
+                labels[nombre_label] = pc_temp
+
+                linea_restante = (
+                    partes_etiqueta[1]
+                    .strip()
+                )
+
+                if not linea_restante:
+                    continue
+
+                linea_limpia = linea_restante
+
+            lineas_instrucciones.append(
+                (
+                    idx,
+                    linea_limpia,
+                    pc_temp
+                )
+            )
+
+            pc_temp += 1
+
+        # Segunda pasada
+        resultado = []
+        errores = []
+
+        for (
+            num_linea,
+            contenido,
+            pc_actual
+        ) in lineas_instrucciones:
+
+            binario = ensamblar_linea(
+                contenido,
+                num_linea=num_linea,
+                labels=labels,
+                pc_actual=pc_actual
+            )
+
+            if binario is None:
+                continue
+
+            if binario.startswith(
+                "ERROR"
+            ):
+                errores.append(
+                    binario
+                )
+            else:
+                resultado.append(
+                    binario
+                )
+
+        if errores:
+
+            detalle = "\n".join(
+                errores
+            )
+
+            continuar = (
+                messagebox.askyesno(
+                    "Advertencia",
+                    f"Se encontraron "
+                    f"{len(errores)} "
+                    f"errores:\n\n"
+                    f"{detalle}\n\n"
+                    f"¿Guardar "
+                    f"instrucciones "
+                    f"válidas?"
+                )
+            )
+
+            if not continuar:
+                return
+
+        ruta_destino = (
+            filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[
+                    (
+                        "Text file",
+                        "*.txt"
+                    ),
+                    (
+                        "Binary file",
+                        "*.bin"
+                    )
+                ]
+            )
+        )
+
+        if ruta_destino:
+
+            with open(
+                ruta_destino,
+                'w'
+            ) as f:
+
+                lineas_8 = []
+
+                for instruccion in resultado:
+                    for i in range(
+                        0,
+                        32,
+                        8
+                    ):
+                        lineas_8.append(
+                            instruccion[i:i+8]
+                        )
+
+                f.write(
+                    "\n".join(
+                        lineas_8
+                    )
+                )
+
+            messagebox.showinfo(
+                "Éxito",
+                f"Archivo generado "
+                f"con "
+                f"{len(resultado)} "
+                f"instrucción(es)."
+            )
+
+    except Exception as e:
+
+        messagebox.showerror(
+            "Error",
+            f"No se pudo "
+            f"procesar: {e}"
+        )
+
+
+# ── Ventana principal ─────────────────────────────
+
+root = tk.Tk()
+
+root.title(
+    "Conversor – Algoritmos R + I + J"
+)
+
+root.geometry("540x270")
+root.resizable(False, False)
+
+tk.Label(
+    root,
+    text="Conversor ASM → Binario (R + I + J)",
+    font=("Arial", 14, "bold")
+).pack(pady=12)
+
+frame_carga = tk.Frame(root)
+frame_carga.pack(pady=8)
+
+btn_cargar = tk.Button(
+    frame_carga,
+    text="Cargar .asm",
+    command=seleccionar_archivo,
+    width=12
+)
+
+btn_cargar.pack(
+    side=tk.LEFT,
+    padx=6
+)
+
+entrada_ruta = tk.Entry(
+    frame_carga,
+    width=42
+)
+
+entrada_ruta.pack(
+    side=tk.LEFT,
+    padx=6
+)
+
+btn_convertir = tk.Button(
+    root,
+    text="CONVERTIR A BINARIO",
+    bg="#4CAF50",
+    fg="white",
+    font=("Arial", 10, "bold"),
+    command=procesar_archivo
+)
+
+btn_convertir.pack(
+    pady=18,
+    ipadx=12,
+    ipady=6
+)
+
+tk.Label(
+    root,
+    text=(
+        "Soporta etiquetas dinámicas\n"
+        "Tipo R: add sub and or xor "
+        "slt srl sra teq tge nop | "
+        "Tipo I: addi slti andi ori "
+        "lw sw beq bne | "
+        "Tipo J: j"
+    ),
+    font=("Arial", 8),
+    fg="gray"
+).pack()
+
+root.mainloop()
